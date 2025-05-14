@@ -5,16 +5,18 @@ CLIENT = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 CLIENT.settimeout(2)
 SERVER = ('127.0.0.1', 8000)
 
-out = []
-for line in open('domain.txt'):
-    a = line.split()
-    scenario = f"{a[0]} {a[1]}"
-    domain   = a[2]
-    CLIENT.sendto(domain.encode(), SERVER)
-    try:
-        ip = CLIENT.recv(512).decode()
-    except socket.timeout:
-        ip = 'Not Found'
-    out.append(f"{scenario}\t{ip}")
+results = []
+with open('domain.txt', 'r') as f:
+    for line in f:
+        domain = line.strip()
+        if not domain:
+            continue
+        CLIENT.sendto(domain.encode(), SERVER)
+        try:
+            ip = CLIENT.recv(512).decode()
+        except socket.timeout:
+            ip = 'Not Found'
+        results.append(f"{domain}\t{ip}")
 
-open('result.txt','w').write('\n'.join(out))
+with open('result.txt', 'w') as f:
+    f.write("\n".join(results))
