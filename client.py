@@ -1,22 +1,22 @@
 #!/usr/bin/env python3
-import socket
-
-CLIENT = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-CLIENT.settimeout(2)
-SERVER = ('127.0.0.1', 8000)
-
-results = []
-with open('domain.txt', 'r') as f:
-    for line in f:
+import socket, pathlib
+SERVER_ADDR = ("127.0.0.1", 8000)
+TIMEOUT_SEC  = 3
+def main():
+    udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    udp.settimeout(TIMEOUT_SEC)
+    results = []
+    for line in pathlib.Path("domain.txt").read_text().splitlines():
         domain = line.strip()
         if not domain:
             continue
-        CLIENT.sendto(domain.encode(), SERVER)
+        udp.sendto(domain.encode(), SERVER_ADDR)
         try:
-            ip = CLIENT.recv(512).decode()
+            data, _ = udp.recvfrom(512)
+            reply = data.decode().strip()
         except socket.timeout:
-            ip = 'Not Found'
-        results.append(f"{domain}\t{ip}")
-
-with open('result.txt', 'w') as f:
-    f.write("\n".join(results))
+            reply = "Not Found"
+        results.append(f"{domain}\t{reply}")
+    pathlib.Path("result.txt").write_text("\n".join(results) + "\n")
+if __name__ == "__main__":
+    main()

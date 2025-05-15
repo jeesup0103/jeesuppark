@@ -1,48 +1,40 @@
 import java.io.*;
 import java.net.*;
-
+import java.util.*;
 public class GlobalDNSServer {
-
-    public static String lookup(String domain) {
-        String[] files = {"global_edu_dns.txt", "global_com_dns.txt"};
-        for (String fileName : files) {
-            try (BufferedReader br = new BufferedReader(new FileReader(fileName))) {
-                String line;
-                while ((line = br.readLine()) != null) {
-                    String[] parts = line.trim().split("\\s+");
-                    if (parts.length == 2 && parts[0].equals(domain)) {
-                        return parts[1];
-                    }
-                }
-            } catch (IOException e) {
-                System.err.println("Error reading " + fileName);
+    private static final int PORT = 9000;
+    private static final Map<String, String> db = new HashMap<>();
+    private static void loadDB(String file) throws IOException {
+        try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+            String line;
+            while ((line = br.readLine()) != null) {
+                String[] parts = line.trim().split("\\s+");
+                if (parts.length == 2) db.put(parts[0], parts[1]);
             }
         }
-        return "Not Found";
     }
-
-    public static void main(String[] args) {
-        final int PORT = 9000;
-        try (ServerSocket serverSocket = new ServerSocket(PORT)) {
-            System.out.println("Global DNS listening on TCP " + PORT + "...");
+    public static void main(String[] args) throws Exception {
+        loadDB("global_edu_dns.txt");
+        loadDB("global_com_dns.txt");
+        try (ServerSocket server = new ServerSocket(PORT, 50, InetAddress.getByName("127.0.0.1"))) {
             while (true) {
-                try (
-                    Socket clientSocket = serverSocket.accept();
-                    BufferedReader in = new BufferedReader(new InputStreamReader(clientSocket.getInputStream()));
-                    BufferedWriter out = new BufferedWriter(new OutputStreamWriter(clientSocket.getOutputStream()))
-                ) {
-                    String domain = in.readLine();
-                    String response = lookup(domain.trim());
-                    out.write(response);
-                    out.newLine();
-                    out.flush();
-                } catch (IOException e) {
-                    System.err.println("Client connection error: " + e.getMessage());
-                }
+                Socket sock = server.accept();
+                new Thread(() -> handle(sock)).start();
             }
+        }
+    }
+    private static void handle(Socket sock) {
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(sock.getInputStream()));
+             PrintWriter out = new PrintWriter(sock.getOutputStream(), true)) {
+            char[] buf = new char[256];
+            int n = in.read(buf);
+            String domain = new String(buf, 0, n).trim();
+            String ip = db.getOrDefault(domain, "Not Found");
+            out.print(ip);out.flush();
         } catch (IOException e) {
-            System.err.println("Could not listen on port " + PORT);
             e.printStackTrace();
+        } finally {
+            try { sock.close(); } catch (IOException ignored) {}
         }
     }
 }

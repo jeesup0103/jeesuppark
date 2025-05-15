@@ -1,100 +1,104 @@
-#include <winsock2.h>
-#include <ws2tcpip.h>
 #include <iostream>
 #include <fstream>
 #include <unordered_map>
 #include <string>
+#include <cstring>
 
-#pragma comment(lib, "ws2_32.lib")
-#define LOCAL_PORT 8000
-#define GLOBAL_PORT 9000
-#define BUFFER_SIZE 512
+#ifdef _WIN32
+    #include <winsock2.h>
+    #include <ws2tcpip.h>
+    #pragma comment(lib, "Ws2_32.lib")
+    using socklen_t = int;
+    #define CLOSESOCK closesocket
+#else
+    #include <sys/socket.h>
+    #include <netinet/in.h>
+    #include <arpa/inet.h>
+    #include <unistd.h>
+    #define INVALID_SOCKET (-1)
+    #define SOCKET_ERROR   (-1)
+    using SOCKET = int;
+    #define CLOSESOCK close
+#endif
 
-std::unordered_map<std::string, std::string> loadLocalDB(const std::string& filename) {
+constexpr uint16_t UDP_PORT = 8000;
+constexpr uint16_t TCP_PORT = 9000;
+using SockAddr = sockaddr_in;
+
+std::unordered_map<std::string, std::string> load_db(const std::string& file) {
+    std::ifstream fin(file);
     std::unordered_map<std::string, std::string> db;
-    std::ifstream file(filename);
     std::string domain, ip;
-    while (file >> domain >> ip) {
-        db[domain] = ip;
-    }
+    while (fin >> domain >> ip) db[domain] = ip;
     return db;
 }
 
 int main() {
-    WSADATA wsa;
-    SOCKET udpSock, tcpSock;
-    sockaddr_in localAddr, clientAddr, globalAddr;
-    char buffer[BUFFER_SIZE];
-    int clientAddrLen = sizeof(clientAddr);
+#ifdef _WIN32
+    WSADATA wsa;  WSAStartup(MAKEWORD(2,2), &wsa);
+#endif
 
-    // Init Winsock
-    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) {
-        std::cerr << "WSAStartup failed\n";
+    SOCKET udp = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp == INVALID_SOCKET) { return 1; }
+
+#ifndef _WIN32
+    int yes = 1;
+    setsockopt(udp, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+#endif
+
+    SockAddr udp_addr{};
+    udp_addr.sin_family      = AF_INET;
+    udp_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    udp_addr.sin_port        = htons(UDP_PORT);
+
+    if (bind(udp, (sockaddr*)&udp_addr, sizeof(udp_addr)) == SOCKET_ERROR) {
         return 1;
     }
 
-    // Load local DNS file
-    auto localDB = loadLocalDB("local_dns.txt");
+    auto local_db = load_db("local_dns.txt");
 
-    // Setup UDP socket
-    udpSock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (udpSock == INVALID_SOCKET) {
-        std::cerr << "UDP socket creation failed\n";
-        WSACleanup();
-        return 1;
-    }
+    char buf[512];
+    for (;;) {
+        SockAddr client {}; socklen_t clen = sizeof(client);
+        int len = recvfrom(udp, buf, sizeof(buf)-1, 0,
+                           (sockaddr*)&client, &clen);
+        if (len <= 0) continue;
+        buf[len] = '\0';
+        std::string domain(buf);
 
-    localAddr.sin_family = AF_INET;
-    localAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
-    localAddr.sin_port = htons(LOCAL_PORT);
-
-    if (bind(udpSock, (sockaddr*)&localAddr, sizeof(localAddr)) == SOCKET_ERROR) {
-        std::cerr << "UDP bind failed\n";
-        closesocket(udpSock);
-        WSACleanup();
-        return 1;
-    }
-
-    std::cout << "Local DNS server listening on UDP port " << LOCAL_PORT << "...\n";
-
-    while (true) {
-        memset(buffer, 0, BUFFER_SIZE);
-        int len = recvfrom(udpSock, buffer, BUFFER_SIZE, 0, (sockaddr*)&clientAddr, &clientAddrLen);
-        if (len == SOCKET_ERROR) continue;
-
-        std::string domain(buffer);
-        std::string reply;
-
-        // Case 1: Found in local
-        if (localDB.find(domain) != localDB.end()) {
-            reply = localDB[domain];
-        } else {
-            // Case 2: Not found → forward to global via TCP
-            tcpSock = socket(AF_INET, SOCK_STREAM, 0);
-            if (tcpSock == INVALID_SOCKET) continue;
-
-            globalAddr.sin_family = AF_INET;
-            globalAddr.sin_addr.s_addr = inet_addr("127.0.0.1");
-            globalAddr.sin_port = htons(GLOBAL_PORT);
-
-            if (connect(tcpSock, (sockaddr*)&globalAddr, sizeof(globalAddr)) == SOCKET_ERROR) {
-                closesocket(tcpSock);
-                continue;
-            }
-
-            send(tcpSock, domain.c_str(), domain.length(), 0);
-            memset(buffer, 0, BUFFER_SIZE);
-            recv(tcpSock, buffer, BUFFER_SIZE, 0);
-            reply = buffer;
-
-            closesocket(tcpSock);
+        std::string answer;
+        auto it = local_db.find(domain);
+        if (it != local_db.end()) {
+            answer = it->second;
         }
+        /* — Case 2/3 : 글로벌 DNS 질의 — */
+        else {
+            SOCKET tcp = socket(AF_INET, SOCK_STREAM, 0);
+            if (tcp == INVALID_SOCKET) { answer = "Not Found"; }
+            else {
+                SockAddr gaddr{};
+                gaddr.sin_family = AF_INET;
+                inet_pton(AF_INET, "127.0.0.1", &gaddr.sin_addr);
+                gaddr.sin_port = htons(TCP_PORT);
 
-        // Send response back to client
-        sendto(udpSock, reply.c_str(), reply.length(), 0, (sockaddr*)&clientAddr, clientAddrLen);
+                if (connect(tcp, (sockaddr*)&gaddr, sizeof(gaddr)) != 0) {
+                    answer = "Not Found";
+                } else {
+                    send(tcp, domain.c_str(), (int)domain.size(), 0);
+                    int n = recv(tcp, buf, sizeof(buf)-1, 0);
+                    buf[n > 0 ? n : 0] = '\0';
+                    answer = buf;
+                }
+                CLOSESOCK(tcp);
+            }
+        }
+        sendto(udp, answer.c_str(), (int)answer.size(), 0,
+               (sockaddr*)&client, clen);
     }
 
-    closesocket(udpSock);
+    CLOSESOCK(udp);
+#ifdef _WIN32
     WSACleanup();
+#endif
     return 0;
 }
